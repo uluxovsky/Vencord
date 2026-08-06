@@ -7,37 +7,45 @@
 import { definePluginSettings } from "@api/Settings";
 import { Logger } from "@utils/Logger";
 import definePlugin, { OptionType } from "@utils/types";
-import { FluxDispatcher, UserStore, Toasts, ChannelStore } from "@webpack/common";
+import { ChannelStore,FluxDispatcher, Toasts, UserStore } from "@webpack/common";
 
 const logger = new Logger("UwUSounds");
 
 const originalPlay = HTMLAudioElement.prototype.play;
+const originalBufferSourceStart = AudioBufferSourceNode.prototype.start;
 let audioInterceptorActive = false;
 
-function setupAudioInterceptor() {
+function injectAudioInterceptor() {
     if (audioInterceptorActive) return;
     audioInterceptorActive = true;
+    
+    // Blokada dla dźwięków odtwarzanych przez standardowy HTMLAudioElement
     HTMLAudioElement.prototype.play = function() {
-        if (!settings.store.Enabled) return originalPlay.call(this);
-
-        try {
-            // Wyłapujemy natywne dźwięki Discorda i mutujemy je
-            const srcStr = typeof this.src === "string" ? this.src : "";
-            if (srcStr && (srcStr.includes("/assets/") || srcStr.includes(".mp3") || srcStr.includes(".wav") || srcStr.includes(".ogg"))) {
-                this.volume = 0;
-                this.muted = true;
-                
-                // Zagraj uniwersalny dźwięk UwU w zamian (zabezpieczone flagą startową)
-                if (typeof isStartingUp !== "undefined" && !isStartingUp) {
-                    playUwU("generic", true);
-                }
-                
-                return Promise.resolve();
+        // Wyłapujemy natywne dźwięki Discorda i mutujemy je
+        if (this.src && (this.src.includes("/assets/") || this.src.includes(".mp3") || this.src.includes(".wav") || this.src.includes(".ogg"))) {
+            this.volume = 0;
+            this.muted = true;
+            
+            // Zagraj uniwersalny dźwięk UwU w zamian (zabezpieczone flagą startową)
+            if (typeof isStartingUp !== "undefined" && !isStartingUp) {
+                playUwU("generic", true);
             }
-        } catch(e) {
-            logger.error("Audio Interceptor Error:", e);
+            
+            return Promise.resolve();
         }
-        return originalPlay.call(this);
+        return originalPlay.apply(this, arguments as any);
+    };
+
+    // Blokada dla dźwięków odtwarzanych przez zaawansowany silnik WebAudio (np. user_join, user_leave)
+    AudioBufferSourceNode.prototype.start = function() {
+        // Ponieważ nasz syntezator używa OscillatorNode, a nie BufferSourceNode,
+        // możemy bezpiecznie zablokować wszystkie BufferSource, które generuje Discord,
+        // o ile wtyczka jest włączona i Discord się już załadował.
+        if (settings.store.Enabled && typeof isStartingUp !== "undefined" && !isStartingUp) {
+            // Ciche "pożarcie" dźwięku
+            return;
+        }
+        return originalBufferSourceStart.apply(this, arguments as any);
     };
 }
 
@@ -66,7 +74,7 @@ function playUwU(category: string, isGeneric = false) {
 
     const timeNow = Date.now();
     if (isGeneric) {
-        // Jeśli w ciągu ostatnich 200ms zagrał jakiś dedykowany dźwięk (np. message), 
+        // Jeśli w ciągu ostatnich 200ms zagrał jakiś dedykowany dźwięk (np. message),
         // nie odtwarzaj dźwięku generic, by zapobiec nałożeniu się na siebie!
         if (timeNow - lastSpecificSoundTime < 200) return;
     } else {
@@ -78,12 +86,12 @@ function playUwU(category: string, isGeneric = false) {
         console.log(`%c[UwUSounds Admin]%c Żądanie dźwięku: ${category}`, "color: #ffb6c1; font-weight: bold;", "color: inherit;");
     }
 
-    let vol = settings.store.Volume / 100;
-    
+    const vol = settings.store.Volume / 100;
+
     try {
         const ctx = getAudioContext();
         const now = ctx.currentTime;
-        
+
         let pitchMod = 1.0;
         if (settings.store.RandomPitch) {
             if (category === "typing") {
@@ -166,7 +174,7 @@ function playUwU(category: string, isGeneric = false) {
         } else if (category === "generic") {
             playTone(800, "sawtooth", now, 0.02, 0.1);
         } else if (category === "typing") {
-            // Typing has its own heavy randomization inside
+            // Pisanie: Klasyczny, stabilny dźwięk (0.05s zapobiega ucinaniu)
             playTone((400 + Math.random() * 50) * pitchMod, "triangle", now, 0.05, 0.2);
         }
     } catch (e) {
@@ -175,6 +183,7 @@ function playUwU(category: string, isGeneric = false) {
 }
 
 // Interceptor na klawiaturę do dźwięku pisania
+let lastServerMessageSoundTime = 0;
 function handleKeyDown(e: KeyboardEvent) {
     try {
         if (settings.store.Playtyping && e && e.key && e.key.length === 1) { // tylko znaki
@@ -188,12 +197,12 @@ function handleMessageCreate(event: any) {
         if (isStartingUp || !settings.store.Enabled) return;
         const message = event?.message;
         if (!message) return;
-        
+
         const currentUser = UserStore?.getCurrentUser();
-        
+
         // ZABEZPIECZENIE PRZED CRASHEM (Wiadomości systemowe nie mają autora!)
         if (!currentUser || !message.author) return;
-        
+
         if (message.author.id === currentUser.id) {
             if (settings.store.Playsend) {
                 playUwU("send");
@@ -205,13 +214,13 @@ function handleMessageCreate(event: any) {
                 const content = (message.content || "").toLowerCase();
                 const hasPingWord = words.some(w => content.includes(w));
                 if (hasPingWord) {
-                    if (settings.store.AdminConsole) logger.info(`[Admin Console] Znaleziono Słowo Kluczowe (Ping Word)!`);
+                    if (settings.store.AdminConsole) logger.info("[Admin Console] Znaleziono Słowo Kluczowe (Ping Word)!");
                     playUwU("pingword");
                     return;
                 }
             }
 
-            // Filtrujemy, żeby dźwięk powiadomienia grał TYLKO przy DM lub Mentions, 
+            // Filtrujemy, żeby dźwięk powiadomienia grał TYLKO przy DM lub Mentions,
             // ALBO gdy wiadomość jest wysłana na tekstowym kanale wewnątrz kanału głosowego (text-in-voice)
             const channel = ChannelStore?.getChannel(message.channel_id);
             const isDM = channel?.isPrivate();
@@ -227,7 +236,7 @@ function handleMessageCreate(event: any) {
                 if (timeNow - lastServerMessageSoundTime >= 60000) {
                     lastServerMessageSoundTime = timeNow;
                     playUwU("message");
-                    if (settings.store.AdminConsole) logger.info(`[Admin Console] Odtworzono powiadomienie serwerowe (kolejne za min. 60s)`);
+                    if (settings.store.AdminConsole) logger.info("[Admin Console] Odtworzono powiadomienie serwerowe (kolejne za min. 60s)");
                 }
             }
         }
@@ -243,7 +252,7 @@ function handleMuteToggle() {
     try {
         if (isStartingUp || !settings.store.MuteSync) return;
         isMutedState = !isMutedState;
-        if (settings.store.AdminConsole) logger.info(`[Admin Console] Wykryto użycie MuteSync`);
+        if (settings.store.AdminConsole) logger.info("[Admin Console] Wykryto użycie MuteSync");
         if (isMutedState) playUwU("mute");
         else playUwU("unmute");
     } catch(e) {}
@@ -259,21 +268,14 @@ function handleDeafenToggle() {
     } catch(e) {}
 }
 
-function handleStreamCreate(event: any) {
+function handleStreamToggle(event: any) {
     try {
         if (isStartingUp) return;
-        const currentUser = UserStore?.getCurrentUser();
-        if (event?.streamKey && currentUser?.id && !event.streamKey.endsWith(currentUser.id)) return;
-        playUwU("stream_start");
-    } catch(e) {}
-}
-
-function handleStreamDelete(event: any) {
-    try {
-        if (isStartingUp) return;
-        const currentUser = UserStore?.getCurrentUser();
-        if (event?.streamKey && currentUser?.id && !event.streamKey.endsWith(currentUser.id)) return;
-        playUwU("stream_stop");
+        if (event.type === "STREAM_START" || event.type === "MEDIA_ENGINE_SET_GO_LIVE_SOURCE") {
+            playUwU("stream_start");
+        } else {
+            playUwU("stream_stop");
+        }
     } catch(e) {}
 }
 
@@ -281,6 +283,21 @@ function handleActivityUpdate(event: any) {
     try {
         if (isStartingUp) return;
         playUwU("activity");
+    } catch(e) {}
+}
+
+let lastRunningGameCount = 0;
+function handleRunningGamesChange(event: any) {
+    try {
+        if (isStartingUp) return;
+        const gamesCount = event?.games?.length || 0;
+        
+        // Zagraj dźwięk tylko, gdy liczba gier WZRASTA (czyli odpalamy nową)
+        if (gamesCount > lastRunningGameCount) {
+            playUwU("game_start");
+            if (settings.store.AdminConsole) logger.info(`[Admin Console] Wykryto uruchomienie nowej gry. Aktywne gry: ${gamesCount}`);
+        }
+        lastRunningGameCount = gamesCount;
     } catch(e) {}
 }
 
@@ -295,10 +312,10 @@ function handleVoiceState(event: any) {
     if (isStartingUp || !settings.store.Enabled) return;
     const currentUser = UserStore?.getCurrentUser();
     if (!currentUser) return;
-    
+
     // ZABEZPIECZENIE PRZED CRASHEM (Brak tablicy states)
     if (!event || !event.voiceStates || !Array.isArray(event.voiceStates)) return;
-    
+
     try {
         const update = event.voiceStates.find((vs: any) => vs.userId === currentUser.id);
         if (update) {
@@ -389,19 +406,19 @@ export default definePlugin({
     description: "Zastępuje wszystkie dźwięki Discorda słodkimi UwU melodyjkami 🐹 (Web Audio API) + Super Funkcje Admina",
     authors: [{ id: 1302034381648695357n, name: "Ulux" }],
     settings,
-    patches: [], 
+    patches: [],
 
     start() {
         logger.info("Starting UwUSounds on old system with new Admin features...");
-        
+
         isStartingUp = true;
-        setupAudioInterceptor();
+        injectAudioInterceptor();
 
         if (settings.store.Playstartup) {
             setTimeout(() => playUwU("startup"), 1500);
         }
 
-        // Odblokowujemy dźwięki systemowe po 4 sekundach od uruchomienia, 
+        // Odblokowujemy dźwięki systemowe po 4 sekundach od uruchomienia,
         // aby Discord zdążył pobrać wiadomości z cache bez spamu dźwięków
         setTimeout(() => {
             isStartingUp = false;
@@ -411,9 +428,10 @@ export default definePlugin({
         FluxDispatcher.subscribe("MESSAGE_CREATE", handleMessageCreate);
         FluxDispatcher.subscribe("AUDIO_TOGGLE_LOCAL_MUTE", handleMuteToggle);
         FluxDispatcher.subscribe("AUDIO_TOGGLE_LOCAL_DEAF", handleDeafenToggle);
-        FluxDispatcher.subscribe("STREAM_CREATE", handleStreamCreate);
-        FluxDispatcher.subscribe("STREAM_DELETE", handleStreamDelete);
+        FluxDispatcher.subscribe("MEDIA_ENGINE_SET_GO_LIVE_SOURCE", handleStreamToggle);
+        FluxDispatcher.subscribe("STREAM_STOP", handleStreamToggle);
         FluxDispatcher.subscribe("LOCAL_ACTIVITY_UPDATE", handleActivityUpdate);
+        FluxDispatcher.subscribe("RUNNING_GAMES_CHANGE", handleRunningGamesChange);
         FluxDispatcher.subscribe("CALL_CREATE", handleCallCreate);
         FluxDispatcher.subscribe("VOICE_STATE_UPDATES", handleVoiceState);
 
@@ -424,7 +442,7 @@ export default definePlugin({
                     const exportStr = btoa(JSON.stringify(settings.store));
                     DiscordNative.clipboard.copy(`UwU_Config::${exportStr}`);
                     Toasts?.show({ message: "Konfiguracja skopiowana do schowka!", type: Toasts.Type.SUCCESS, id: Toasts.genId() });
-                    if (settings.store.AdminConsole) logger.info(`[Admin Console] Konfiguracja wyeksportowana pomyślnie.`);
+                    if (settings.store.AdminConsole) logger.info("[Admin Console] Konfiguracja wyeksportowana pomyślnie.");
                 } catch(e) { }
                 settings.store.ExportConfig = false; // untoggle automatically
             }
@@ -436,9 +454,10 @@ export default definePlugin({
         FluxDispatcher.unsubscribe("MESSAGE_CREATE", handleMessageCreate);
         FluxDispatcher.unsubscribe("AUDIO_TOGGLE_LOCAL_MUTE", handleMuteToggle);
         FluxDispatcher.unsubscribe("AUDIO_TOGGLE_LOCAL_DEAF", handleDeafenToggle);
-        FluxDispatcher.unsubscribe("STREAM_CREATE", handleStreamCreate);
-        FluxDispatcher.unsubscribe("STREAM_DELETE", handleStreamDelete);
+        FluxDispatcher.unsubscribe("MEDIA_ENGINE_SET_GO_LIVE_SOURCE", handleStreamToggle);
+        FluxDispatcher.unsubscribe("STREAM_STOP", handleStreamToggle);
         FluxDispatcher.unsubscribe("LOCAL_ACTIVITY_UPDATE", handleActivityUpdate);
+        FluxDispatcher.unsubscribe("RUNNING_GAMES_CHANGE", handleRunningGamesChange);
         FluxDispatcher.unsubscribe("CALL_CREATE", handleCallCreate);
         FluxDispatcher.unsubscribe("VOICE_STATE_UPDATES", handleVoiceState);
         if (exportWatcherInterval) clearInterval(exportWatcherInterval);
